@@ -1,0 +1,491 @@
+#define F_CPU 14745600UL   //2560 clock frequency
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <string.h>
+#include <avr/interrupt.h>
+
+#include "uart.h"
+#include "avr-wifi.h"
+#include "lsa_new.h"
+
+#define true 1
+#define false 0
+#define ATCommand 0
+#define ATStatus 1
+#define RSTCommand 2
+#define RSTStatus 3
+#define CWMODECommand 5
+#define CWMODEStatus 6
+#define CWJAPCommand 7
+#define CWJAPStatus 8
+#define CIFSRCommand 11
+#define CIFSRStatus 12
+#define CIPMUXServer 17
+#define CIPMUXServerStatus 18
+#define CIFSRServer 19
+#define CIFSRServerStatus 20
+#define CIPSERVERServer 25
+#define CIPSERVERServerStatus 26
+#define LED 50
+#define WIFICommand 100
+#define TimeOut ((int) 20)
+#define CWJAPTimeOut (7 * TimeOut)
+#define CIFSRTimeOut (3 * TimeOut)
+#define ConversionConstant 655
+
+#define BUTTONA (clickButtonsConversion.bits.bit0)
+#define BUTTONB (clickButtonsConversion.bits.bit1)
+#define BUTTONC (clickButtonsConversion.bits.bit2)
+#define BUTTOND (clickButtonsConversion.bits.bit3)
+#define BUTTONE (clickButtonsConversion.bits.bit4)
+#define BUTTONF (clickButtonsConversion.bits.bit5)
+#define REVERSE (clickButtonsConversion.bits.bit7)
+
+#define LEFTARROW (touchButtonsConversion.bits.bit0)
+#define UPARROW (touchButtonsConversion.bits.bit1)
+#define RIGHTARROW (touchButtonsConversion.bits.bit2)
+#define DOWNARROW (touchButtonsConversion.bits.bit3)
+
+char dataReceived = 0;
+int lengthOfData = 0;
+
+char* USSID = "BOT";      //hotspot username and password
+char* PASSWD = "IITDELHI16";
+
+unsigned char tempmain [200];   //buffer
+int index;
+
+void wifi_event_handler(int event, const char* input, const int len) {
+	switch(event) {
+		case WIFI_EVENT_ANY: {
+					
+		} break;
+		case WIFI_EVENT_ERROR: {
+			PORTA=0x01;	
+		} break;
+		// ESP8266 is not responding
+		case WIFI_EVENT_TIMEOUT: {
+			PORTA=0x22;
+		} break;
+		// Wifi was connected
+		case WIFI_EVENT_WIFI_CONNECTED: {
+			PORTA=0x03;
+		} break;
+		// Wifi was disconnected
+		case WIFI_EVENT_WIFI_DISCONNECTED: {
+			PORTA=0x04;
+		} break;
+		// Connect to host
+		case WIFI_EVENT_CONNECTED: {
+			PORTA=0x05;
+		} break;
+		// Host sends data
+		case WIFI_EVENT_DATA: {
+			//
+			// Look for JSON data in response
+			// We do not need this connection anymore
+			// wifi_link_close();
+			// Format received data
+			// Display data continously in text shifting manner			
+		}
+		break;
+	}
+}
+
+union {
+	struct {
+		unsigned char bit0 : 1;
+		unsigned char bit1 : 1;
+		unsigned char bit2 : 1;
+		unsigned char bit3 : 1;
+		unsigned char bit4 : 1;
+		unsigned char bit5 : 1;
+		unsigned char bit6 : 1;
+		unsigned char bit7 : 1;
+	       }bits;
+	unsigned char character;
+}clickButtonsConversion;
+union {
+	struct {
+		unsigned char bit0 : 1;
+		unsigned char bit1 : 1;
+		unsigned char bit2 : 1;
+		unsigned char bit3 : 1;
+		unsigned char bit4 : 1;
+		unsigned char bit5 : 1;
+		unsigned char bit6 : 1;
+		unsigned char bit7 : 1;
+	}bits;
+	unsigned char character;
+}touchButtonsConversion;
+int IsReceived (char *response)
+{
+	int i, j, lengthOfArray, lengthOfResponse;
+	
+	lengthOfArray = length;
+	lengthOfResponse = strlen(response);
+	for (i = 0; i < lengthOfArray; i++)
+	{
+		if (toupper(tempmain[i]) == toupper(response[0]))
+		{
+			for (j = 1; ((j < lengthOfResponse) && (i+j < lengthOfArray)); j++)
+			{
+				if (toupper(tempmain[i+j]) != toupper(response[j]))
+					break;
+			}
+			if (j >= lengthOfResponse)
+				return (i+j);
+		}
+	}	
+	return 0;
+}
+
+extern int length;
+
+#define PACKETS 5
+#define ANGLE 0
+#define CLICKBUTTONS 1
+#define LEFTSEEKBAR 2
+#define TOUCHBUTTONS 3
+#define RIGHTSEEKBAR 4
+
+//spi pins of 2560
+#define MOSI 2
+#define SCK 1
+#define SS 0
+#define MISO 3
+
+//passing n throwing mosfet pins
+#define gripper 3
+#define clutch  4
+#define holder  5
+
+//bldc driver pins
+#define brake 5
+#define enable 6
+
+#define angle_90 127
+#define angle_0 1
+#define angle_180 255
+
+//wheel direction 
+#define backward PORTL &=~((1<<0)|(1<<1)|(1<<3)|(1<<4));
+#define forward PORTL|=(1<<0)|(1<<1)|(1<<3)|(1<<4);
+
+
+uint8_t prev_angle=0,lfront=0,line_error=0,correct=0;
+uint16_t speed=0;
+
+
+//ss pins of spi
+#define front_active PORTK&= ~((1<<0)|(1<<1));
+#define rear_active PORTK&= ~((1<<2)|(1<<3));
+#define left_active PORTK&= ~((1<<0)|(1<<3));
+#define right_active PORTK&= ~((1<<1)|(1<<2));
+#define all_active PORTK=0x00;
+
+//set single angle
+void set_multi(uint8_t data)
+{   
+	SPDR = data;
+	while(!(SPSR & (1<<SPIF)));
+	PORTK=0xFF;
+}
+
+//set all angles
+void set_angle(uint8_t data)
+{   
+  all_active;			
+	SPDR = data;
+	while(!(SPSR & (1<<SPIF)));
+	PORTK=0xFF;
+}
+
+//spi mater configuration
+void master_init()
+{	
+  DDRK=0xFF;				//ss pins
+	PORTK=0xFF;
+	DDRB|=(1<<MOSI)|(1<<SCK)|(1<<SS);
+	SPCR=(1<<SPE)|(1<<MSTR)|(1<<SPR0);
+	PORTB |= (1<<0);
+}
+
+//Circular left rotation
+void rotate_left()
+{   
+  PORTL |=((1<<3)|(1<<4));
+	PORTL &=~((1<<0)|(1<<1));
+}
+
+//Circular right rotation
+void rotate_right()
+{  
+  PORTL &=~((1<<3)|(1<<4));
+	PORTL |=((1<<0)|(1<<1));
+}
+
+void driver_init()
+{
+	TCCR1A=0b10101011;		//3 pwm channels
+	TCCR1B=0b00001010;
+	OCR1A=0;
+	OCR1B=0;
+	OCR1C=0;
+	TCCR3A=0b10101011;		//1 pwm channel
+	TCCR3B=0b00001010;
+	OCR3A=0;
+}
+
+void set_pwm(uint16_t speed)
+{
+	OCR1A=speed;  //w1
+	OCR1B=speed; //w0
+	OCR1C=speed; //w3
+	OCR3A=speed;  //w2
+}
+void drive()
+{	
+  set_pwm(200);
+	_delay_us(20);
+	set_pwm(250);
+	_delay_us(20);
+	set_pwm(300);
+	_delay_us(20);
+	set_pwm(350);
+	_delay_us(20);
+	set_pwm(400);
+	_delay_us(20);
+  set_pwm(speed);
+}
+
+void drive_slow()
+{
+	set_pwm(200);
+	_delay_us(20);
+	set_pwm(250);
+	_delay_us(20);
+	set_pwm(300);
+	_delay_us(20);
+	set_pwm(350);
+}
+
+void line_new()
+{   
+  lfront=receive4();
+	if(lfront==255)
+	{ //lflag4=1;
+	}
+	else if(lfront>35)
+	{   line_error=(lfront-35);
+		correct=(uint8_t)(127+line_error);
+	}
+	else
+	{   line_error=(35-lfront);
+		correct=(uint8_t)(128-line_error);
+	}
+	front_active
+	set_multi(correct);
+}
+
+int main(void)
+{ 
+	int i, j;
+	uint8_t flag=0,throw=0,grip=0,rev=0,swapsflag=0;
+	
+	DDRA = 0xFF;				//led port				
+	DDRL = 0xFF;				// motor direction, bldc control
+	DDRB = 0xFF;				//spi, pwm port
+	DDRJ |=(1<<gripper)|(1<<clutch)|(1<<holder);    //gripper, throwing mosfet pins
+	DDRL |=(1<<brake)|(1<<enable);
+	PORTL &=~((1<<brake)|(1<<enable));
+	DDRE=0xff;
+	DDRE&= ~(1<<0);
+	DDRH = 0xFF;
+	DDRD = 0xFF;
+	
+	driver_init();
+	master_init();
+	lsa_init();
+	disablelsa2();
+	disablelsa4();
+	disablelsa3();
+	
+	uart_init(UART_BAUD_SELECT(9600, F_CPU));
+	PORTA = 0x30;
+	wifi_init();
+	PORTA=0x0F;
+	wifi_connect(USSID, PASSWD);
+	PORTA = 0xF1;
+	unsigned char angle, clickButtons, touchButtons, leftSeekbar, rightSeekbar;
+	angle = clickButtons = touchButtons = leftSeekbar = rightSeekbar = 0;
+	length = 0;
+	unsigned char currentByte[PACKETS];
+	for (i = 0; i < PACKETS; i++)
+		currentByte[i] = 0;
+	currentByte[ANGLE] = 1;	
+	
+	while (1)
+	{
+		wifi_hear();
+		if (IsReceived("CONNECT") != 0)
+		{
+			PORTA = 0x00;
+			length = 0;
+			tempmain [0] = 0;
+		}
+		else
+		{
+			if (IsReceived("CLOSE") != 0)
+			{
+				PORTA = 0xFF;
+				length = 0;
+				tempmain [0] = 0;
+			}
+			else
+			{
+				if ((index = IsReceived("+IPD")) != 0)
+				{
+					if (dataReceived == 1)
+					{
+						if (tempmain [index] == ',')
+							index++;
+						i = index;
+						while (tempmain [i] != ',')
+							i++;
+						i++;
+						lengthOfData = 0;
+						while (tempmain [i] != ':')
+						{
+							lengthOfData *= 10;
+							lengthOfData += (tempmain [i] - '0');
+							i++;
+						}	
+						
+						i += lengthOfData;
+						if (length >= (i+1))
+						{
+							while (!((tempmain[i-2] == 0x55) && (tempmain[i-1] == 0xC2) && (tempmain[i] == 0xAA)))
+								i--;
+							i++;
+							for (j = 0; j < PACKETS; j++)
+							{
+								if (tempmain[i] == 0xC2)
+								{
+									currentByte[j] = tempmain[i+1];
+									i = i+2;
+								}
+								else
+								{
+									if (tempmain[i] == 0xC3)
+									{
+										currentByte[j] = 192 + (tempmain[i+1] & 0x3F);
+										i = i+2;
+									}
+									else
+									{
+										currentByte[j] = tempmain[i];
+										i++;
+									}
+								}	
+							}
+							
+							clickButtonsConversion.character = currentByte[CLICKBUTTONS];
+							touchButtonsConversion.character = currentByte[TOUCHBUTTONS];
+							PORTA=currentByte[CLICKBUTTONS];
+							speed=((currentByte[LEFTSEEKBAR]*2)+300);
+							//a 0set b preset c throw d gerege e invert revon mobileimp  
+							
+							if(BUTTONA)   //center set
+							{
+                set_pwm(0);
+                set_angle(127);
+                flag=1;
+								
+							}
+							if(LEFTARROW)  //left turn
+							{
+                set_angle(0);
+                rotate_left();
+                drive_slow();
+                flag=3;
+							}
+							else if(RIGHTARROW)  //right turn
+							{    
+								set_angle(0);
+                rotate_right();
+                drive_slow();
+                flag=4;
+								
+							}
+							else if(BUTTOND)  //gripper release
+							{   
+                 if(grip==0)
+                 {	
+                  PORTJ|=(1<<gripper);
+                  grip=1;
+                 }
+                 else
+                 {
+                    PORTJ&=~(1<<gripper);
+                    grip=0;
+                  }
+							}
+							else if (BUTTONC)   //throw
+							{	 	
+                if(throw==0)
+									{
+										PORTJ |=(1<<holder);   //holder on
+										PORTL |=(1<<enable) ;
+										throw=1;   //mtor on
+									}  
+                else
+									{
+										PORTJ &= ~(1<<holder); //holder disengaged
+										_delay_ms(5);
+										PORTJ |=(1<<clutch);   //clutch engaged
+										_delay_ms(500);
+										PORTL &=~(1<<enable);
+										PORTJ &=~(1<<clutch);
+										throw=0;
+									}
+							}
+							
+							else if(currentByte[ANGLE] !=0 )
+							{       
+								set_angle(currentByte[ANGLE]);
+								if(BUTTONE)
+								{
+									if(REVERSE)
+									forward
+									else
+									backward
+								}
+								else
+								{
+									if(REVERSE)
+									backward
+									else
+									forward
+								}
+								if(!(BUTTONB))
+								drive();
+							 }
+							else
+							{
+								set_pwm(0);
+								flag=7;
+							}
+							
+							dataReceived = 0;
+							length = 0;
+							tempmain [0] = 0;
+						
+						}
+					}
+				}
+			}
+		}
+	}
+}
