@@ -82,12 +82,7 @@ void wifi_event_handler(int event, const char* input, const int len) {
 		} break;
 		// Host sends data
 		case WIFI_EVENT_DATA: {
-			//
-			// Look for JSON data in response
-			// We do not need this connection anymore
-			// wifi_link_close();
-			// Format received data
-			// Display data continously in text shifting manner			
+			
 		}
 		break;
 	}
